@@ -26,59 +26,6 @@
 // [branch 012] Include errno, so we can access it in our new perror code
 #include <errno.h>
 
-// [branch 008] Support for safe assertions.  Note that the evaluation of the
-// expression occurs within the context of the transaction, but we don't
-// commit before we call the safe_assert_internal code.
-#if defined(NDEBUG)
-#define tm_assert(e)   ((void)0)
-#else
-#include <stdlib.h>
-#define tm_assert(e) ((e) ? (void)0 : tm_assert_internal(__FILE__, __LINE__, __func__, #e))
-__attribute__((transaction_pure))
-void tm_assert_internal(const char *filename, int linenum, const char *funcname, const char *sourceline);
-#endif /* NDEBUG */
-
-// [branch 008] This is our 'safe' printf-and-abort function
-__attribute__((transaction_pure))
-void tm_msg_and_die(const char* msg);
-
-// [branch 009] Provide safe versions of memcmp, memcpy, strlen, strncmp,
-//              strncpy, and realloc
-__attribute__((transaction_safe))
-int tm_memcmp(const void *s1, const void *s2, size_t n);
-__attribute__((transaction_safe))
-void *tm_memcpy(void *dst, const void *src, size_t len);
-__attribute__((transaction_safe))
-size_t tm_strlen(const char *s);
-__attribute__((transaction_safe))
-int tm_strncmp(const char *s1, const char *s2, size_t n);
-__attribute__((transaction_safe))
-char *tm_strncpy(char *dst, const char *src, size_t n);
-__attribute__((transaction_safe))
-void *tm_realloc(void *ptr, size_t size, size_t old_size);
-
-// [branch 009b] a custom strncpy that reads via TM, and writes directly to a
-//               location presumed to be thread-private (e.g., on the stack)
-__attribute__((transaction_safe))
-char *tm_strncpy_to_local(char *local_dst, const char *src, size_t n);
-
-// [branch 009b] Provide safe versions of strtol, atoi, strtol, strchr, and
-//               isspace
-__attribute__((transaction_safe))
-long int tm_strtol(const char *nptr, char **endptr, int base);
-__attribute__((transaction_safe))
-int tm_atoi(const char *nptr);
-__attribute__((transaction_safe))
-unsigned long long int tm_strtoull(const char *nptr, char **endptr, int base);
-__attribute__((transaction_safe))
-char *tm_strchr(const char *s, int c);
-// [branch 009b] This can just be marked pure
-__attribute__((transaction_pure))
-int tm_isspace(int c);
-
-// [branch 012] Provide support for oncommit handlers
-__attribute__((transaction_pure))
-void registerOnCommitHandler(void (*func)(void*), void *param);
 void delayed_perror(int error_number, char *message);
 
 /** Maximum length of a key. */
@@ -146,19 +93,19 @@ void delayed_perror(int error_number, char *message);
     } \
 }
 
-#define ITEM_key(item) (((char*)&((item)->data)) \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+#define ITEM_key(_item) (((char*)&((_item)->data)) \
+         + (((_item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
-#define ITEM_suffix(item) ((char*) &((item)->data) + (item)->nkey + 1 \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+#define ITEM_suffix(_item) ((char*) &((_item)->data) + (_item)->nkey + 1 \
+         + (((_item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
-#define ITEM_data(item) ((char*) &((item)->data) + (item)->nkey + 1 \
-         + (item)->nsuffix \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+#define ITEM_data(_item) ((char*) &((_item)->data) + (_item)->nkey + 1 \
+         + (_item)->nsuffix \
+         + (((_item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
-#define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nkey + 1 \
-         + (item)->nsuffix + (item)->nbytes \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+#define ITEM_ntotal(_item) (sizeof(struct item) + (_item)->nkey + 1 \
+         + (_item)->nsuffix + (_item)->nbytes \
+         + (((_item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
 #define STAT_KEY_LEN 128
 #define STAT_VAL_LEN 128
@@ -415,10 +362,10 @@ extern struct settings settings;
 /**
  * Structure for storing items within memcached.
  */
-typedef struct _stritem {
-    struct _stritem *next;
-    struct _stritem *prev;
-    struct _stritem *h_next;    /* hash chain next */
+struct item {
+    struct item *next;
+    struct item *prev;
+    struct item *h_next;    /* hash chain next */
     rel_time_t      time;       /* least recent access */
     rel_time_t      exptime;    /* expire time */
     int             nbytes;     /* size of data */
@@ -438,7 +385,7 @@ typedef struct _stritem {
     /* then null-terminated key */
     /* then " flags length\r\n" (no terminating null) */
     /* then data with terminating \r\n (no terminating null; it's binary!) */
-} item;
+};
 
 typedef struct {
     pthread_t thread_id;        /* unique ID of this thread */
@@ -510,9 +457,9 @@ struct conn {
     int    msgcurr;   /* element in msglist[] being transmitted now */
     int    msgbytes;  /* number of bytes in current msg */
 
-    item   **ilist;   /* list of items to write out */
+    struct item   **ilist;   /* list of items to write out */
     int    isize;
-    item   **icurr;
+    struct item   **icurr;
     int    ileft;
 
     char   **suffixlist;

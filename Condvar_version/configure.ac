@@ -3,11 +3,12 @@ m4_include([version.m4])
 m4_include([m4/c99-backport.m4])
 AC_INIT(memcached, VERSION_NUMBER, memcached@googlegroups.com)
 AC_CANONICAL_SYSTEM
-AC_CONFIG_SRCDIR(memcached.c)
-AM_INIT_AUTOMAKE(AC_PACKAGE_NAME, AC_PACKAGE_VERSION)
+AC_CONFIG_SRCDIR(memcached.cpp)
+AM_INIT_AUTOMAKE
 AM_CONFIG_HEADER(config.h)
 
 AC_PROG_CC
+AC_PROG_CXX
 
 dnl **********************************************************************
 dnl DETECT_ICC ([ACTION-IF-YES], [ACTION-IF-NO])
@@ -57,6 +58,8 @@ if test "$ICC" = "no"; then
    dnl c99, and also updated cflags to force gnu-tm support
    AC_PROG_CC_STDC
    CFLAGS="$CFLAGS -fgnu-tm"
+   CXXFLAGS="$CXXFLAGS -fno-strict-aliasing -pthread -fgnu-tm -fpermissive -I/home/chao/git/libcondvar/"
+   LDFLAGS="-L/home/chao/git/libcondvar/"
 fi
 
 AM_PROG_CC_C_O
@@ -266,7 +269,7 @@ AC_CACHE_CHECK([for libevent directory], ac_cv_libevent_dir, [
 ])
   fi
 ])
-LIBS="-levent $LIBS"
+LIBS="-levent -lcondvar $LIBS"
 if test $ac_cv_libevent_dir != "(system)"; then
   if test -d "$ac_cv_libevent_dir/lib" ; then
     LDFLAGS="-L$ac_cv_libevent_dir/lib $LDFLAGS"

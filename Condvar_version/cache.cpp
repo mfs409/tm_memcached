@@ -1,4 +1,7 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+
+#include "tm_utils.h"
+#include "memcached.h"
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -22,8 +25,8 @@ cache_t* cache_create(const char *name, size_t bufsize, size_t align,
     cache_t* ret = calloc(1, sizeof(cache_t));
     char* nm = strdup(name);
     void** ptr = calloc(initial_pool_size, sizeof(void*));
-    if (ret == NULL || nm == NULL || ptr == NULL ||
-        pthread_mutex_init(&ret->mutex, NULL) == -1) {
+    if (ret == NULL || nm == NULL || ptr == NULL
+        /*|| pthread_mutex_init(&ret->mutex, NULL) == -1*/) {
         free(ret);
         free(nm);
         free(ptr);
@@ -64,30 +67,32 @@ void cache_destroy(cache_t *cache) {
     }
     free(cache->name);
     free(cache->ptr);
-    pthread_mutex_destroy(&cache->mutex);
+//    pthread_mutex_destroy(&cache->mutex);
     free(cache);
 }
 
 void* cache_alloc(cache_t *cache) {
     void *ret;
     void *object;
-    pthread_mutex_lock(&cache->mutex);
-    if (cache->freecurr > 0) {
-        ret = cache->ptr[--cache->freecurr];
-        object = get_object(ret);
-    } else {
-        object = ret = malloc(cache->bufsize);
-        if (ret != NULL) {
-            object = get_object(ret);
+//    pthread_mutex_lock(&cache->mutex);
+    __transaction_atomic {
+	    if (cache->freecurr > 0) {
+		ret = cache->ptr[--cache->freecurr];
+		object = get_object(ret);
+	    } else {
+		object = ret = malloc(cache->bufsize);
+		if (ret != NULL) {
+		    object = get_object(ret);
 
-            if (cache->constructor != NULL &&
-                cache->constructor(object, NULL, 0) != 0) {
-                free(ret);
-                object = NULL;
-            }
-        }
+		    if (cache->constructor != NULL &&
+			cache->constructor(object, NULL, 0) != 0) {
+			free(ret);
+			object = NULL;
+		    }
+		}
+	    }
     }
-    pthread_mutex_unlock(&cache->mutex);
+//    pthread_mutex_unlock(&cache->mutex);
 
 #ifndef NDEBUG
     if (object != NULL) {
@@ -104,23 +109,24 @@ void* cache_alloc(cache_t *cache) {
 }
 
 void cache_free(cache_t *cache, void *ptr) {
-    pthread_mutex_lock(&cache->mutex);
+//    pthread_mutex_lock(&cache->mutex);
 
+    __transaction_atomic {
 #ifndef NDEBUG
     /* validate redzone... */
-    if (memcmp(((char*)ptr) + cache->bufsize - (2 * sizeof(redzone_pattern)),
+    if (tm_memcmp(((char*)ptr) + cache->bufsize - (2 * sizeof(redzone_pattern)),
                &redzone_pattern, sizeof(redzone_pattern)) != 0) {
-        raise(SIGABRT);
+//        raise(SIGABRT);
         cache_error = 1;
-        pthread_mutex_unlock(&cache->mutex);
+//        pthread_mutex_unlock(&cache->mutex);
         return;
     }
     uint64_t *pre = ptr;
     --pre;
     if (*pre != redzone_pattern) {
-        raise(SIGABRT);
+//        raise(SIGABRT);
         cache_error = -1;
-        pthread_mutex_unlock(&cache->mutex);
+//        pthread_mutex_unlock(&cache->mutex);
         return;
     }
     ptr = pre;
@@ -130,7 +136,7 @@ void cache_free(cache_t *cache, void *ptr) {
     } else {
         /* try to enlarge free connections array */
         size_t newtotal = cache->freetotal * 2;
-        void **new_free = realloc(cache->ptr, sizeof(char *) * newtotal);
+        void **new_free = tm_realloc(cache->ptr, sizeof(char *) * newtotal, sizeof(char *) * cache->freetotal);
         if (new_free) {
             cache->freetotal = newtotal;
             cache->ptr = new_free;
@@ -143,6 +149,7 @@ void cache_free(cache_t *cache, void *ptr) {
 
         }
     }
-    pthread_mutex_unlock(&cache->mutex);
+//    pthread_mutex_unlock(&cache->mutex);
+    }
 }
 

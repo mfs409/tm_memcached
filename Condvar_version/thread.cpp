@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <string.h>
 #include <pthread.h>
+#include "condvar.hpp"
 
 #ifdef __sun
 #include <atomic.h>
@@ -33,24 +34,16 @@ typedef struct conn_queue CQ;
 struct conn_queue {
     CQ_ITEM *head;
     CQ_ITEM *tail;
-    pthread_mutex_t lock;
-    pthread_cond_t  cond;
+    cond_var_t  cond;
 };
 
 // [branch 002] Removed declaration of cache lock
 
 /* Connection lock around accepting new connections */
-pthread_mutex_t conn_lock = PTHREAD_MUTEX_INITIALIZER;
-
-#if !defined(HAVE_GCC_ATOMICS) && !defined(__sun)
-pthread_mutex_t atomics_mutex = PTHREAD_MUTEX_INITIALIZER;
-#endif
-
 // [branch 002] Removed declaration of stats_lock
 
 /* Free list of CQ_ITEM structs */
 static CQ_ITEM *cqi_freelist;
-static pthread_mutex_t cqi_freelist_lock;
 
 // [branch 003b] Removed item_locks
 /* size of the item lock hash table */
@@ -74,8 +67,7 @@ static LIBEVENT_THREAD *threads;
  * Number of worker threads that have finished setting themselves up.
  */
 static int init_count = 0;
-static pthread_mutex_t init_lock;
-static pthread_cond_t init_cond;
+static cond_var_t init_cond;
 
 
 static void thread_libevent_process(int fd, short which, void *arg);
@@ -101,18 +93,15 @@ unsigned short tm_refcount_decr(unsigned short *refcount) {
 }
 
 // [branch 003b] Removed all item_lock-related functions
-
+// [This function is now deprecated since we now use it inline]
 static void wait_for_thread_registration(int nthreads) {
-    while (init_count < nthreads) {
-        pthread_cond_wait(&init_cond, &init_lock);
-    }
 }
 
 static void register_thread_initialized(void) {
-    pthread_mutex_lock(&init_lock);
-    init_count++;
-    pthread_cond_signal(&init_cond);
-    pthread_mutex_unlock(&init_lock);
+    __transaction_atomic {
+	    init_count++;
+	    init_cond.cond_signal();
+    }
 }
 
 void switch_item_lock_type(enum item_lock_types type) {
@@ -132,24 +121,32 @@ void switch_item_lock_type(enum item_lock_types type) {
             break;
     }
 
-    pthread_mutex_lock(&init_lock);
-    init_count = 0;
-    for (i = 0; i < settings.num_threads; i++) {
-        if (write(threads[i].notify_send_fd, buf, 1) != 1) {
-            perror("Failed writing to notify pipe");
-            /* TODO: This is a fatal problem. Can it ever happen temporarily? */
+    bool once = true;
+    while(1) {
+        __transaction_relaxed {
+            if (once) {
+		    init_count = 0;
+		    for (i = 0; i < settings.num_threads; i++) {
+			if (write(threads[i].notify_send_fd, buf, 1) != 1) {
+			    perror("Failed writing to notify pipe");
+			    /* TODO: This is a fatal problem. Can it ever happen temporarily? */
+			}
+		    }
+		    once = false;
+            }
+
+	    if (init_count < settings.num_threads)
+		init_cond.cond_wait();
+	    else
+                break;
         }
     }
-    wait_for_thread_registration(settings.num_threads);
-    pthread_mutex_unlock(&init_lock);
 }
 
 /*
  * Initializes a connection queue.
  */
 static void cq_init(CQ *cq) {
-    pthread_mutex_init(&cq->lock, NULL);
-    pthread_cond_init(&cq->cond, NULL);
     cq->head = NULL;
     cq->tail = NULL;
 }
@@ -162,14 +159,14 @@ static void cq_init(CQ *cq) {
 static CQ_ITEM *cq_pop(CQ *cq) {
     CQ_ITEM *item;
 
-    pthread_mutex_lock(&cq->lock);
-    item = cq->head;
-    if (NULL != item) {
-        cq->head = item->next;
-        if (NULL == cq->head)
-            cq->tail = NULL;
+    __transaction_atomic {
+	    item = cq->head;
+	    if (NULL != item) {
+		cq->head = item->next;
+		if (NULL == cq->head)
+		    cq->tail = NULL;
+	    }
     }
-    pthread_mutex_unlock(&cq->lock);
 
     return item;
 }
@@ -180,14 +177,14 @@ static CQ_ITEM *cq_pop(CQ *cq) {
 static void cq_push(CQ *cq, CQ_ITEM *item) {
     item->next = NULL;
 
-    pthread_mutex_lock(&cq->lock);
-    if (NULL == cq->tail)
-        cq->head = item;
-    else
-        cq->tail->next = item;
-    cq->tail = item;
-    pthread_cond_signal(&cq->cond);
-    pthread_mutex_unlock(&cq->lock);
+    __transaction_atomic {
+	    if (NULL == cq->tail)
+		cq->head = item;
+	    else
+		cq->tail->next = item;
+	    cq->tail = item;
+	    cq->cond.cond_signal();
+    }
 }
 
 /*
@@ -195,12 +192,13 @@ static void cq_push(CQ *cq, CQ_ITEM *item) {
  */
 static CQ_ITEM *cqi_new(void) {
     CQ_ITEM *item = NULL;
-    pthread_mutex_lock(&cqi_freelist_lock);
-    if (cqi_freelist) {
-        item = cqi_freelist;
-        cqi_freelist = item->next;
+    
+    __transaction_atomic {
+	    if (cqi_freelist) {
+		item = cqi_freelist;
+		cqi_freelist = item->next;
+	    }
     }
-    pthread_mutex_unlock(&cqi_freelist_lock);
 
     if (NULL == item) {
         int i;
@@ -217,11 +215,11 @@ static CQ_ITEM *cqi_new(void) {
          */
         for (i = 2; i < ITEMS_PER_ALLOC; i++)
             item[i - 1].next = &item[i];
-
-        pthread_mutex_lock(&cqi_freelist_lock);
-        item[ITEMS_PER_ALLOC - 1].next = cqi_freelist;
-        cqi_freelist = &item[1];
-        pthread_mutex_unlock(&cqi_freelist_lock);
+        
+        __transaction_atomic {
+        	item[ITEMS_PER_ALLOC - 1].next = cqi_freelist;
+        	cqi_freelist = &item[1];
+        }
     }
 
     return item;
@@ -232,10 +230,10 @@ static CQ_ITEM *cqi_new(void) {
  * Frees a connection queue item (adds it to the freelist.)
  */
 static void cqi_free(CQ_ITEM *item) {
-    pthread_mutex_lock(&cqi_freelist_lock);
-    item->next = cqi_freelist;
-    cqi_freelist = item;
-    pthread_mutex_unlock(&cqi_freelist_lock);
+    __transaction_atomic {
+    	item->next = cqi_freelist;
+    	cqi_freelist = item;
+    }
 }
 
 
@@ -260,9 +258,9 @@ static void create_worker(void *(*func)(void *), void *arg) {
  * Sets whether or not we accept new connections.
  */
 void accept_new_conns(const bool do_accept) {
-    pthread_mutex_lock(&conn_lock);
-    do_accept_new_conns(do_accept);
-    pthread_mutex_unlock(&conn_lock);
+    __transaction_relaxed {
+        do_accept_new_conns(do_accept);
+    }
 }
 /****************************** LIBEVENT THREADS *****************************/
 
@@ -308,7 +306,7 @@ static void setup_thread(LIBEVENT_THREAD *me) {
  */
 static void *worker_libevent(void *arg) {
     LIBEVENT_THREAD *me = arg;
-
+    cond_var_t::thread_init();
     /* Any per-thread setup can happen here; thread_init() will block until
      * all threads have finished initializing.
      */
@@ -733,14 +731,9 @@ void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out) {
 void thread_init(int nthreads, struct event_base *main_base) {
     int         i;
     int         power;
+    
+    cond_var_t::thread_init();
 
-    // [branch 002] There is no longer a cache_lock to initialize
-    // [branch 002] There is no longer a stats_lock to initialize
-
-    pthread_mutex_init(&init_lock, NULL);
-    pthread_cond_init(&init_cond, NULL);
-
-    pthread_mutex_init(&cqi_freelist_lock, NULL);
     cqi_freelist = NULL;
 
     /* Want a wide lock table, but don't waste memory */
@@ -791,8 +784,13 @@ void thread_init(int nthreads, struct event_base *main_base) {
     }
 
     /* Wait for all the threads to set themselves up before returning. */
-    pthread_mutex_lock(&init_lock);
-    wait_for_thread_registration(nthreads);
-    pthread_mutex_unlock(&init_lock);
+    while (1) {
+        __transaction_atomic {
+            if (init_count < nthreads)
+                init_cond.cond_wait();
+            else
+                break;
+        }
+    }
 }
 

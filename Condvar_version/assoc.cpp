@@ -11,6 +11,7 @@
  * The rest of the file is licensed under the BSD license.  See LICENSE.
  */
 
+#include "tm_utils.h"
 #include "memcached.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -24,17 +25,21 @@
 #include <string.h>
 #include <assert.h>
 #include <pthread.h>
+#include "condvar.hpp"
 
 #include <semaphore.h>
 // [branch 001] switched from pthread_cod_t maintenance cond to sem_t mx_sem
-sem_t mx_sem;
+cond_var_t mx_sem;
 
 // [branch 001] sem_t doesn't have a static initializer, so we have this
 // function to help with initialization
+// [chao] not necessary since mx_sem now is of type cond_var_t
+/*
 static void early_sem_init()
 {
     sem_init(&mx_sem, 0, 0);
 }
+*/
 
 typedef  unsigned long  int  ub4;   /* unsigned 4-byte quantities */
 typedef  unsigned       char ub1;   /* unsigned 1-byte quantities */
@@ -72,7 +77,7 @@ void assoc_init(const int hashtable_init) {
     //
     // NB: we checked, and this is called early enough that the semaphore
     // will be initialized before worker threads are created.
-    early_sem_init();
+    // early_sem_init();
 
     if (hashtable_init) {
         hashpower = hashtable_init;
@@ -177,10 +182,10 @@ static void assoc_expand(void) {
 }
 
 // [branch 012] Move sempost to oncommit handler
-static void ase_sempost1(void *param)
-{
-    sem_post(&mx_sem);
-}
+//static void ase_sempost1(void *param)
+//{
+//    sem_post(&mx_sem);
+//}
 
 // [branch 004] This function is called from a relaxed transaction
 // [branch 012] With oncommit, this becomes safe
@@ -191,7 +196,8 @@ static void assoc_start_expand(void) {
     started_expanding = true;
     // [branch 001] rather than signal on a condvar, we post on a semaphore
     // [branch 012] move sempost to oncommit
-    registerOnCommitHandler(ase_sempost1, NULL);
+    // registerOnCommitHandler(ase_sempost1, NULL);
+    mx_sem.cond_signal();
 }
 
 /* Note: this isn't an assoc_update.  The key must not already exist to call this */
@@ -253,10 +259,12 @@ static void amt_fprintf1(void *param)
 }
 
 static void *assoc_maintenance_thread(void *arg) {
-
+    cond_var_t::thread_init();
     // [branch 006] use a transaction expression to access a
     //              formerly-volatile variable
-    while (__transaction_atomic(tm_do_run_maintenance_thread)) {
+    while (1) {
+        if (!__transaction_atomic(tm_do_run_maintenance_thread))
+             break;
         int ii = 0;
 
         /* Lock the cache, and bulk move multiple buckets to the new
@@ -310,7 +318,9 @@ static void *assoc_maintenance_thread(void *arg) {
             // [branch 001] instead of waiting on a condvar, then unlocking,
             //              we can unlock, then wait on a semaphore
             }
-            sem_wait(&mx_sem);
+
+            mx_sem.cond_wait();
+
             /* Before doing anything, tell threads to use a global lock */
             slabs_rebalancer_pause();
             switch_item_lock_type(ITEM_LOCK_GLOBAL);
@@ -355,7 +365,8 @@ void stop_assoc_maintenance_thread() {
     // [branch 001] instead of signalling a condvar while holding the lock,
     //              we can release the lock and then post on the semaphore
     }
-    sem_post(&mx_sem);
+
+    mx_sem.cond_signal();
 
     /* Wait for the maintenance thread to stop */
     pthread_join(maintenance_tid, NULL);

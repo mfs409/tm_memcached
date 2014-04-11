@@ -1,0 +1,15 @@
+**/*.log
+.deps/
+Makefile
+doc/Makefile
+config.h
+config.status
+stamp-h1
+autom4te.cache
+*.o
+*.gcno
+memcached
+memcached-debug
+sizes
+testapp
+timedrun

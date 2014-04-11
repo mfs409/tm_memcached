@@ -7,6 +7,7 @@
  * slab size is always 1MB, since that's the maximum item size allowed by the
  * memcached protocol.
  */
+#include "tm_utils.h"
 #include "memcached.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -20,6 +21,7 @@
 #include <string.h>
 #include <assert.h>
 #include <pthread.h>
+#include "condvar.hpp"
 
 // [branch 010] Switching from condvars to semaphores...
 #include <semaphore.h>
@@ -527,7 +529,7 @@ void slabs_adjust_mem_requested(unsigned int id, size_t old, size_t ntotal)
 
 // [branch 010] The maintenance_cond is never used, so we deleted it
 // [branch 010] Replace slab_rebalance_cond with a semaphore
-static sem_t slab_rebalance_sem;
+static cond_var_t slab_rebalance_sem;
 // [branch 006] Replace volatile variable with "transactional" variable
 static int tm_do_run_slab_thread = 1;
 // [branch 006] Replace volatile variable with "transactional" variable
@@ -853,6 +855,7 @@ static int slab_automove_decision(int *src, int *dst) {
  */
 static void *slab_maintenance_thread(void *arg) {
     int src, dest;
+    cond_var_t::thread_init();
 
     // [branch 006] use a transaction expression to access a
     //              formerly-volatile variable
@@ -877,47 +880,54 @@ static void *slab_maintenance_thread(void *arg) {
  */
 static void *slab_rebalance_thread(void *arg) {
     int was_busy = 0;
+    cond_var_t::thread_init();
+
     /* So we first pass into cond_wait with the mutex held */
     // [branch 010] Replace mutex acquire with spin acquire of our new lock
-    pseudo_lock_spin();
-
+    // [chao] reslab_rebalance_semplace the spin lock with transaction begin 
+    // pseudo_lock_spin();
     // [branch 006] use a transaction expression to access a
     //              formerly-volatile variable
-    while (__transaction_atomic(tm_do_run_slab_rebalance_thread)) {
-        // [branch 006] Use a transaction expression to check the (renamed)
-        //              rebalance signal
-        if (__transaction_atomic(tm_slab_rebalance_signal) == 1) {
-            if (slab_rebalance_start() < 0) {
-                /* Handle errors with more specifity as required. */
-                // [branch 006] Use a transaction to set the var
-                __transaction_atomic { tm_slab_rebalance_signal = 0; }
-            }
+    while (1) {
+        __transaction_relaxed {
+		if (!__transaction_atomic(tm_do_run_slab_rebalance_thread))
+		    break;
+		// [branch 006] Use a transaction expression to check the (renamed)
+		//              rebalance signal
+		if (__transaction_atomic(tm_slab_rebalance_signal) == 1) {
+		    if (slab_rebalance_start() < 0) {
+			/* Handle errors with more specifity as required. */
+			// [branch 006] Use a transaction to set the var
+			__transaction_atomic { tm_slab_rebalance_signal = 0; }
+		    }
 
-            was_busy = 0;
-        }
-        // [branch 006] Use a transaction expression to check the (renamed)
-        //              rebalance signal
-        else if (__transaction_atomic(tm_slab_rebalance_signal) && slab_rebal.slab_start != NULL) {
-            was_busy = slab_rebalance_move();
-        }
+		    was_busy = 0;
+		}
+		// [branch 006] Use a transaction expression to check the (renamed)
+		//              rebalance signal
+		else if (__transaction_atomic(tm_slab_rebalance_signal) && slab_rebal.slab_start != NULL) {
+		    was_busy = slab_rebalance_move();
+		}
 
-        if (slab_rebal.done) {
-            slab_rebalance_finish();
-        } else if (was_busy) {
-            /* Stuck waiting for some items to unlock, so slow down a bit
-             * to give them a chance to free up */
-            usleep(50);
-        }
+		if (slab_rebal.done) {
+		    slab_rebalance_finish();
+		} else if (was_busy) {
+		    /* Stuck waiting for some items to unlock, so slow down a bit
+		     * to give them a chance to free up */
+		    usleep(50);
+		}
 
-        // [branch 006] Use a transaction expression to check the (renamed)
-        //              rebalance signal
-        if (__transaction_atomic(tm_slab_rebalance_signal) == 0) {
-            /* always hold this lock while we're running */
-            // [branch 010] Release the lock, wait on a semaphore, re-acquire
-            //              the lock
-            pseudo_unlock();
-            sem_wait(&slab_rebalance_sem);
-            pseudo_lock_spin();
+		// [branch 006] Use a transaction expression to check the (renamed)
+		//              rebalance signal
+		if (__transaction_atomic(tm_slab_rebalance_signal) == 0) {
+		    /* always hold this lock while we're running */
+		    // [branch 010] Release the lock, wait on a semaphore, re-acquire
+		    //              the lock
+		    // [chao] replaced with cond_wait
+                    //pseudo_unlock();
+		    slab_rebalance_sem.cond_wait();
+		    //pseudo_lock_spin();
+		}
         }
     }
     return NULL;
@@ -947,10 +957,10 @@ static int slabs_reassign_pick_any(int dst) {
 }
 
 // [branch 012] Wrap sem_post so we can call it via oncommit
-static void dsr_sempost1(void *param)
-{
-    sem_post(&slab_rebalance_sem);
-}
+//static void dsr_sempost1(void *param)
+//{
+//    sem_post(&slab_rebalance_sem);
+//}
 
 // [branch 004] This function is called from a relaxed transaction
 // [branch 012] This is safe once we move sempost to oncommit
@@ -984,20 +994,26 @@ static enum reassign_result_type do_slabs_reassign(int src, int dst) {
     __transaction_atomic { tm_slab_rebalance_signal = 1; }
     // [branch 010] Switch from condvar signal to sem post
     // [branch 012] Replace sem_post with oncommit
-    registerOnCommitHandler(dsr_sempost1, NULL);
-
+    // registerOnCommitHandler(dsr_sempost1, NULL);
+    slab_rebalance_sem.cond_signal();
     return REASSIGN_OK;
 }
 
 enum reassign_result_type slabs_reassign(int src, int dst) {
     enum reassign_result_type ret;
     // [branch 010] Use our new safe trylock...
+    /*
     if (pseudo_trylock() != 0) {
         return REASSIGN_RUNNING;
     }
     ret = do_slabs_reassign(src, dst);
     pseudo_unlock();
     return ret;
+    */
+    __transaction_atomic {
+      ret = do_slabs_reassign(src, dst);
+   }
+   return ret;
 }
 
 /* If we hold this lock, rebalancer can't wake up or move */
@@ -1028,7 +1044,7 @@ int start_slab_maintenance_thread(void) {
     }
 
     // [branch 010] Replace condvar initialization with semaphore init
-    sem_init(&slab_rebalance_sem, 0, 0);
+    // [sem replaced with cond_var, thus sem init becomes unnecessary]
     // [branch 010] Replace lock initialization with set of an int
     slab_rebalance_pseudolock = 0;
 

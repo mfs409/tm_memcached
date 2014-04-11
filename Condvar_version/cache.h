@@ -26,7 +26,7 @@ extern int cache_error;
  * @param notused2 This parameter is currently not used.
  * @return you should return 0, but currently this is not checked
  */
-typedef int cache_constructor_t(void* obj, void* notused1, int notused2);
+typedef int __attribute__((transaction_safe)) cache_constructor_t(void* obj, void* notused1, int notused2);
 /**
  * Destructor used to clean up allocated objects before they are
  * returned to the operating system.
@@ -36,7 +36,7 @@ typedef int cache_constructor_t(void* obj, void* notused1, int notused2);
  * @param notused2 This parameter is currently not used.
  * @return you should return 0, but currently this is not checked
  */
-typedef void cache_destructor_t(void* obj, void* notused);
+typedef void __attribute__((transaction_safe)) cache_destructor_t(void* obj, void* notused);
 
 /**
  * Definition of the structure to keep track of the internal details of

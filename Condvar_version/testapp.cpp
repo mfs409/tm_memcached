@@ -22,56 +22,13 @@
 #include "cache.h"
 #include "util.h"
 #include "protocol_binary.h"
+#include "tm_utils.h"
 
 #define TMP_TEMPLATE "/tmp/test_file.XXXXXXX"
-
-// [branch 008b] This is our 'safe' assert function.  It is also in
-//              memcached.c, but we need to duplicate it here for the sake of
-//              building...
-#if !defined(NDEBUG)
-void tm_assert_internal(const char *filename, int linenum, const char *funcname, const char *sourceline);
-void tm_assert_internal(const char *filename, int linenum, const char *funcname, const char *sourceline)
-{
-    // [mfs] This isn't entirely correct... the formatting is wrong for
-    // Solaris, and on Linux we are supposed to also print the name of the
-    // executable... we can live without such touch-ups for now...
-    fprintf(stderr, "%s:%d: %s: Assertion '%s' failed.\n", filename, linenum, funcname, sourceline);
-    abort();
-}
-#endif
 
 // [branch 009b] tm_isspace, tm_strchr, and tm_strtoull are not available
 //               when testing util.c, so we fake them here
 #include <ctype.h>
-__attribute__((transaction_pure))
-int tm_isspace(int c);
-int tm_isspace(int c)
-{
-    return isspace(c);
-}
-__attribute__((transaction_pure))
-static unsigned long long int z_strtoull(const char *nptr, char **endptr, int base)
-{
-    return strtoull(nptr, endptr, base);
-}
-__attribute__((transaction_safe))
-unsigned long long int tm_strtoull(const char *nptr, char **endptr, int base);
-unsigned long long int tm_strtoull(const char *nptr, char **endptr, int base)
-{
-    return z_strtoull(nptr, endptr, base);
-}
-__attribute__((transaction_pure))
-static char *z_strchr(const char *s, int c)
-{
-    return strchr(s, c);
-}
-__attribute__((transaction_safe))
-char *tm_strchr(const char *s, int c);
-char *tm_strchr(const char *s, int c)
-{
-    return z_strchr(s, c);
-}
-
 enum test_return { TEST_SKIP, TEST_PASS, TEST_FAIL };
 
 static pid_t server_pid;
@@ -90,6 +47,7 @@ static enum test_return cache_create_test(void)
 
 const uint64_t constructor_pattern = 0xdeadcafebabebeef;
 
+__attribute__((transaction_safe))
 static int cache_constructor(void *buffer, void *notused1, int notused2) {
     uint64_t *ptr = buffer;
     *ptr = constructor_pattern;
@@ -202,7 +160,10 @@ static enum test_return cache_redzone_test(void)
 
     /* Ignore SIGABORT */
     struct sigaction old_action;
-    struct sigaction action = { .sa_handler = SIG_IGN, .sa_flags = 0};
+    struct sigaction action;
+    action.sa_handler = SIG_IGN;
+    action.sa_flags = 0;
+
     sigemptyset(&action.sa_mask);
     sigaction(SIGABRT, &action, &old_action);
 
@@ -469,9 +430,11 @@ static enum test_return test_issue_44(void) {
 static struct addrinfo *lookuphost(const char *hostname, in_port_t port)
 {
     struct addrinfo *ai = 0;
-    struct addrinfo hints = { .ai_family = AF_UNSPEC,
-                              .ai_protocol = IPPROTO_TCP,
-                              .ai_socktype = SOCK_STREAM };
+    struct addrinfo hints;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_socktype = SOCK_STREAM;
+
     char service[NI_MAXSERV];
     int error;
 

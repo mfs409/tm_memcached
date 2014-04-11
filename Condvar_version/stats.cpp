@@ -7,6 +7,8 @@
  * Author:
  *   Steven Grimm <sgrimm@facebook.com>
  */
+
+#include "tm_utils.h"
 #include "memcached.h"
 #include <stdio.h>
 #include <stdlib.h>

@@ -4,23 +4,25 @@ noinst_PROGRAMS = memcached-debug sizes testapp timedrun
 
 BUILT_SOURCES=
 
-testapp_SOURCES = testapp.c util.c util.h
+testapp_SOURCES = testapp.cpp util.cpp util.h \
+                  tm_utils.cpp tm_utils.h
 
-timedrun_SOURCES = timedrun.c
+timedrun_SOURCES = timedrun.cpp
 
-memcached_SOURCES = memcached.c memcached.h \
-                    hash.c hash.h \
-                    slabs.c slabs.h \
-                    items.c items.h \
-                    assoc.c assoc.h \
-                    thread.c daemon.c \
-                    stats.c stats.h \
-                    util.c util.h \
-                    trace.h cache.h sasl_defs.h
+memcached_SOURCES = memcached.cpp memcached.h \
+                    hash.cpp hash.h \
+                    slabs.cpp slabs.h \
+                    items.cpp items.h \
+                    assoc.cpp assoc.h \
+                    thread.cpp daemon.cpp \
+                    stats.cpp stats.h \
+                    util.cpp util.h \
+                    trace.h cache.h sasl_defs.h \
+                    tm_utils.cpp tm_utils.h
 
 if BUILD_CACHE
-memcached_SOURCES += cache.c
-testapp_SOURCES += cache.c
+memcached_SOURCES += cache.cpp
+testapp_SOURCES += cache.cpp
 endif
 
 if BUILD_SOLARIS_PRIVS
@@ -28,7 +30,7 @@ memcached_SOURCES += solaris_priv.c
 endif
 
 if ENABLE_SASL
-memcached_SOURCES += sasl_defs.c
+memcached_SOURCES += sasl_defs.cpp
 endif
 
 memcached_debug_SOURCES = $(memcached_SOURCES)
@@ -36,7 +38,7 @@ memcached_CPPFLAGS = -DNDEBUG
 memcached_debug_LDADD = @PROFILER_LDFLAGS@
 memcached_debug_CFLAGS = @PROFILER_FLAGS@
 
-memcached_LDADD =
+memcached_LDADD = -lcondvar
 memcached_DEPENDENCIES =
 memcached_debug_DEPENDENCIES =
 CLEANFILES=
